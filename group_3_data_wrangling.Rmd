@@ -1,0 +1,452 @@
+---
+title: "COVID-19 in Argentina: an analysis of outbreak progression and regional heterogeneity in time delays between COVID-19 symptoms and diagnosis."
+subtitle: "European Doctoral School of Demography (2020-2021)"
+author: "Barke, C., Garcia, G., Gazeley, U. & Pitombeira, L."
+date: "13/11/2020"
+bibliography: data_wrangling_refs.bib
+output: html_document
+---
+
+<style type="text/css">
+
+h1.title {
+  font-size: 32px;
+  color: Black;
+  text-align: center;
+}
+
+h3.subtitle {
+  font-size: 24px;
+  color: Black;
+  text-align: center;
+}
+
+h4.author { /* Header 4 - and the author and data headers use this too  */
+    font-size: 18px;
+  font-family: "Times New Roman", Times, serif;
+  color: Black;
+  text-align: center;
+}
+h4.date { /* Header 4 - and the author and data headers use this too  */
+  font-size: 18px;
+  font-family: "Times New Roman", Times, serif;
+  color: Black;
+  text-align: center;
+}
+</style>
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE, fig.align='center')
+```
+
+
+## Background 
+
+Using microdata of COVID-19 cases (tested and confirmed) from Argentina’s Ministry of Health, we analysed the progression of the outbreak of COVID-19 by looking at cases and deaths over time. We also analysed the regional variation in the number of cases accounting for population size, in order to identify COVID-19 hotspots. An understanding of the current stage of the pandemic is critical to guide Argentina’s COVID-19 response. 
+
+Second, we analysed the size and regional distribution of the time lag between COVID-19 patients’ first symptoms of the virus and their subsequent diagnosis. Delays in the period between the onset of COVID-19 symptoms and diagnosis can render mitigation strategies ineffective [@casella2020can]. For instance, delays may have important implications for disease transmission, to trace contacts who may be incubating the virus. It can also lead to the potentially unnecessary quarantine of essential workers, thereby reducing health and care system capacity. Moreover, wiithout up-to-date information, health systems cannot make informed and timely decisions about resource allocation. 
+
+The lag between symptom onset and diagnosis may be attributable to three potential causes: 
+
+1. Delays in Argentina’s testing system, due to slow sampling and/or laboratory testing.
+
+2. Delays in the communication of test results to patients.
+
+3. Delays in patients with symptoms deciding to get tested.
+
+With the data that are available, it is not possible to distinguish between these three sources of delay. However, we chose to test a proxy for the first of the possible sources: hospital human resources through the number of available medical doctors in Argentina.
+
+The data used in this analysis is available at:
+
+<http://datos.salud.gob.ar/dataset/covid-19-casos-registrados-en-la-republica-argentina> 
+
+
+
+### Data Cleaning:
+
+Since we are working with the raw data, we ran some sanity checks on the key variables of interest. There is considerable missing data for the dates we were interested in analysing (*date_first_symptoms* and *date_diagnosis*). It is possible that asymptomatic individuals will have no date for symptoms but could be tested because of being a “close contact” of a positive case. For the analysis of the lag between the onset of symptoms and diagnosis, however, we drop these cases.
+
+Second, we also eliminated illogical cases where the date of diagnosis was before the onset of symptoms since a negative lag is suggestive of data quality issues. We also eliminate those cases that are labelled as “suspicious”, and therefore may not be true COVID-19 cases. 
+
+We also dropped cases which were missing key variables required in our analysis: Sex, Region and Age. We found 17,232 cases where at least one of those variables was not available. Since our sample is large, we decided to drop these cases rather than redistribute them based on the distribution of the observed data where these variables were not missing.
+
+Finally, we limited the sample only to those cases which were confirmed. This is because we found a much longer lag for those tests which ended up being negative then those which were positive. This suggests that negative tests results were not communicated back to patients in a timely manner, or alternatively, there is some error in the system updating the diagnosis status. For a graphical representation of this problem, see the Appendix. 
+
+Overall, from the 3.07 millions cases in the database, our resulting sample size is **618,997** cases. 
+
+
+```{r loading_data_packages, include=FALSE}
+# Loading packages
+library(tidyverse)
+library(readr)
+library(lubridate)
+library(ggrepel)
+library(ggplot2)
+library(sf)
+library(colorspace)
+library(knitr)
+
+
+# Importing the data: use of UTF-8 encoding to keep ñ and á,é,í,ó,ú (if using read.csv instead of read_csv)
+arg <- read_csv("Covid19Casos.csv")
+
+glimpse(arg)
+
+
+###########################################################
+# Leave the No.Sex/No.Region/No.Age, take the cannoli
+
+arg.v2 <- arg %>% filter(sexo != "NR", # 9532 cases
+                         edad <= 105,  # 278
+                         residencia_provincia_nombre != "SIN ESPECIFICAR" # 7422 cases
+                         )
+
+# Removing original data.frame, not needed anymore
+rm(arg)
+
+```
+
+
+### Data Wrangling:
+
+Using the mutate function we created the following new features: first, we created a time lag variable for the difference between the date of first symptoms and the date of diagnosis. While doing so, we also checked the number of cases where there was a negative lag, i.e. the date of diagnosis was after the date of first symptoms (around 0.5% across regions with no more than 0.8% for the worst region). These cases with a negative lag were dropped from the analysis. Finally, we also created ten year age groups, taking into account that for infants less than one year, their age is expressed in months.
+
+
+```{r missings, , fig.cap= "Source: Ministry of Health - Argentina"}
+# Let's check some NA's for the dates we want to see:
+library(naniar)
+
+arg.v2 %>%
+  filter(clasificacion_resumen == "Confirmado") %>%
+  select(fecha_inicio_sintomas, fecha_diagnostico, fecha_apertura) %>% 
+  sample_n(size = 100000) %>%
+  vis_miss()
+
+
+# Lag.diagnose + age groups by 10s + sanity check on negative lags + time to death for later analysis
+
+arg.v2 %>% 
+  mutate(lag.diagnosis = fecha_diagnostico - fecha_inicio_sintomas,
+         # Sanity check
+         flag.neg.lag = case_when(lag.diagnosis < 0 ~ "01 Negative lag",
+                                  TRUE ~ "02 0 or + lag"),
+         # When creating age groups, we have to take into account that infants (<12 months) 
+         # have their age expressed in months
+         age_group = case_when(`edad_años_meses` == "Meses" ~ 0,
+                               TRUE ~ edad - edad %% 10),
+         time_to_death = fecha_fallecimiento - fecha_inicio_sintomas) -> arg.v2
+
+
+# Check
+# glimpse(arg.v2)
+
+
+# How many lag.diagnosis are negative??
+kable(round(prop.table(table(arg.v2$carga_provincia_nombre, arg.v2$flag.neg.lag),1)*100,2))
+# Good, more than 99% of lags look OK. Santiago del Estero the one with more problems.
+# We can impute values to this 1% by age + region (?)
+
+```
+
+### Analysis of progression of the COVID-19 outbreak in Argentina 
+
+Next, to understand the progression of the pandemic in Argentina, we analysed the daily counts of cases and deaths over time. This can aid understanding of whether the outbreak is increasing, levelling off, or declining in Argentina. As seen elsewhere, there is a noticeable lag between the date at which cases and deaths begin to fall [@testa2020visualizing]. 
+
+```{r }
+
+#####################################
+# Looking for the loop...
+arg.v2 %>%
+  filter(clasificacion_resumen == "Confirmado") %>%
+  group_by(fecha_apertura) %>% 
+  summarize(N_cases = n()) -> cases
+
+arg.v2 %>%
+  filter(!is.na(fecha_fallecimiento)) %>%
+  group_by(fecha_apertura) %>% 
+  summarize(N_deaths = n()) -> deaths
+
+
+cases %>% left_join(deaths, by = "fecha_apertura") %>%
+  mutate(N_deaths_2 = ifelse(is.na(N_deaths),0,N_deaths)) %>% 
+  arrange(fecha_apertura) %>%
+  select(fecha_apertura, N_cases, N_deaths_2) %>% 
+  pivot_longer(!fecha_apertura, names_to = "type_register", values_to = "values") %>% 
+  mutate(Register = case_when(type_register == "N_deaths_2" ~ "Deaths",
+                              type_register == "N_cases" ~ "Cases",
+                              TRUE ~"CHECK")) %>% 
+  select(fecha_apertura, Register, values) %>% 
+  ggplot(aes(x = fecha_apertura,  y = values, color = Register)) + 
+  geom_line() +
+  ggtitle("Figure 1. COVID Cases and Deaths Over Time") +
+  xlab("Cases") + ylab("Deaths")
+  
+
+```
+
+As we can see from the graph, both the number of daily cases and deaths have been falling in Argentina since the first weeks of October. 
+
+
+### Analysis of cases by region
+
+Next, we had a look at the confirmed cases by region, by time. Since the number of cases in a provincia will be highly correlated with the population size, we explored differences in case numbers after accounting for the population size of the provincia. By expressing the case numbers per 1000 population, this allows us to more clearly identify where hotspots are occurring.
+
+Since the population data we merged in is the annual population of the region, whereas case numbers are daily, we divide the population size by 365 days. 
+
+We also group the provincias into “macro regions”, in order to improve the readability of the time series line graph and reduce the number of lines on the graph. We also split up the most populous regions with the largest cities from other regions in the country, since it was in these places that COVID-19 outbreaks first occurred.
+
+
+
+```{r covid_confirmed_cases, , fig.cap= "Source: Ministry of Health - Argentina"}
+#####################################
+# Population data comes from:
+# https://www.indec.gob.ar/indec/web/Nivel4-Tema-2-24-85
+# I took 2016 data from the xls and create a csv with the desired information (quicker than trying to extract all 24 regions from Excel...)
+
+pop_region <- read_csv("ARG_Region-pop_2016.csv")
+
+
+arg.v2 %>%
+    filter(clasificacion_resumen == "Confirmado", 
+           !is.na(fecha_inicio_sintomas), 
+           !is.na(fecha_diagnostico)) %>%
+    rename(provincia_id = carga_provincia_id) %>% 
+    mutate(provincia_id = as.numeric(provincia_id)) %>% 
+    group_by(fecha_apertura, provincia_id, carga_provincia_nombre) %>% 
+    summarize(N = n()) %>%
+    left_join(pop_region, by = "provincia_id") %>%
+    mutate(region_flag = case_when(carga_provincia_nombre %in% c("CABA", "Buenos Aires", "Córdoba", "Santa Fe") ~ "01 Big regions",
+                                   TRUE ~ "02 Other Regions"),
+           macro_region = case_when(carga_provincia_nombre %in% c("CABA", "Buenos Aires", "Córdoba", "Santa Fe") ~ carga_provincia_nombre,
+                                    carga_provincia_nombre %in% c("Neuquén", "Río Negro", "Chubut", "Santa Cruz", "Tierra del Fuego", "La Pampa") ~ "Patagonia",
+                                    carga_provincia_nombre %in% c("Mendoza", "San Juan", "San Luis", "La Rioja") ~ "Cuyo",
+                                    carga_provincia_nombre %in% c("Jujuy", "Salta", "Tucumán", "Catamarca") ~ "NOA",
+                                    carga_provincia_nombre %in% c("Formosa", "Chaco", "Santiago del Estero") ~ "NEA",
+                                    carga_provincia_nombre %in% c("Misiones", "Entre Ríos", "Corrientes") ~ "Mesopotamia",
+                                    TRUE ~ "Check"
+                                    ))  %>%
+    group_by(fecha_apertura, region_flag, macro_region) %>% 
+    summarize(N_region = sum(N),
+              population_region = sum(population_forecast_2016)) %>%
+    ggplot(aes(x=fecha_apertura, y = (N_region/(population_region/365)*1000), color=macro_region)) + ggtitle("Figure 2. Regional Cases  Distribution Over Time") +
+xlab("Date of Registry") + ylab("Infected per Region by 1k population") +
+    geom_line() +
+    labs(color = "Macro Regions") +
+    facet_grid(~ region_flag)
+
+
+```
+
+These graphs show that the COVID-19 outbreak (cases/population) started in CABA and Buenos Aires regions. The lag between cases rising in other regions illustrates that CABA and Buenos Aires were initially able to contain the spread of the virus. From August onwards, however, cases started increasing in other regions, with a notable hotspot occurring in Patagonia in October. 
+
+
+### Analysis of lag between symptom onset and diagnosis by region
+
+As discussed above, the time lag between the onset of COVID-19 symptoms and diagnosis is important for disease mitigation, with a short lag enabling contact tracing to more effectively reduce transmission, and so that those with symptoms can return to the workforce more quickly if their test is negative. 
+
+We analysed regional heterogeneity in the time lag between COVID-19 onset and diagnosis in Argentina. To do so, we compared the performance of each region with the national average lag. 
+
+For each region (*provincia*) we calculated the average lag of all the cases registered for that region and subtracted the national average. Positive values represent a longer lag in diagnosis compared to the national level.
+
+The resulting map shows that San Luis and La Rioja are performing worse than the other regions, while La Pampa and Santiago del Estero are the best performers. CABA (Ciudad de Buenos Aires) and Buenos Aires (provincia) represented roughly the national average lag, which is unsurprising given they have the number of COVID cases in Argentina (due both to the bigger population and also being the entry points of the virus into the country). The northern regions, that usually exhibit higher rates of poverty and worse socio-economic outcomes, show the second worst results of the macro regions. This may indicate that less health expenditure could be a factor that explains the diagnosis lags, which we explore further below. 
+
+
+```{r uploading_json, results = FALSE}
+################
+# Let's MAP!
+#
+# Tutorial: https://mappinggis.com/2019/07/creacion-de-mapas-con-r-y-ggplot2/
+
+# JSON available at: <http://code.highcharts.com/mapdata/countries/ar/ar-all.geo.json>
+
+# Reading the json with sf::st_read and saving the map information for Argentina
+argentina_map <- st_read("ar-all.geo.json")
+
+```
+
+```{r mapping_regional_lag, fig.cap= "Source: Ministry of Health - Argentina"}
+# We need a new data.frame with the average lag per region, the average lag overall
+# and that difference by region
+arg.v2 %>%
+  filter(clasificacion_resumen == "Confirmado",
+         !is.na(fecha_inicio_sintomas), 
+         !is.na(fecha_diagnostico),
+         fecha_diagnostico > fecha_inicio_sintomas) %>%
+  mutate(arg_avg_lag = mean(lag.diagnosis, na.rm = T)) %>%
+  group_by(carga_provincia_nombre, arg_avg_lag) %>% 
+  summarise(avg_lag = mean(lag.diagnosis, na.rm = T),
+            med_lag = median(lag.diagnosis, na.rm = T)) %>%
+  ungroup() %>% 
+  mutate(diff_regional_lag = as.numeric(avg_lag) - as.numeric(arg_avg_lag),
+         # In the JSON Map, CABA is Ciudad de Buenos Aires.
+         carga_provincia_nombre = case_when(carga_provincia_nombre == "CABA" ~ "Ciudad de Buenos Aires",
+                                            TRUE ~ carga_provincia_nombre)
+  ) %>% 
+  rename(name = carga_provincia_nombre) %>% 
+  select(name, diff_regional_lag) -> region_lag_2
+
+# Merging map information with regional lag information
+argentina_map_2 <- argentina_map %>% left_join(region_lag_2)
+
+# Setting limits of the color space for the plot: centered scale
+limit <- max(abs(region_lag_2$diff_regional_lag)) * c(-1, 1)
+
+# Plotting the map and filling each region by its difference compared to overall lag
+ggplot(argentina_map_2) +
+  geom_sf(aes(fill = diff_regional_lag)) +
+  scale_fill_continuous_diverging(palette = "Blue-Red 3", p2 = 2, limit = limit) +
+  ggtitle("Figure 3. Regional Lags between Symptoms and Diagnose") +
+  labs(fill = "Lag (days)") +
+  theme(plot.title = element_text(hjust = 0.4, colour = "black",face = "bold.italic"))
+
+
+```
+
+### Looking for an explanation
+
+To try to explain the regional variation in the lag between the onset of COVID-19 symptoms and diagnosis, we looked at the relationship between the average lag of the regions and the number of doctors per 1000 population. Whilst doctors are not usually the personnel who administer the COVID-19 test, we hypothesise that it may still serve as a proxy for overall health system capacity, and is likely to be correlated with the number of staff (e.g. nurses) who do conduct the COVID-19 tests, (for whom data is not available). The number of staff is likely to be a key constraint in the number of tests that regions can perform.  
+
+We looked at the relationship between the number of doctors and the average lag in a scatterplot. 
+
+
+
+```{r doctors_lags, fig.cap= "Source: Ministry of Health - Argentina & National Statistics Bureau - Argentina"}
+################################
+# Let's try to explain this...
+
+# Adding QTY doctors per region and QTY population (forecasted from 2010 census)
+# With this 2 features we will have Amount_Drs_per_1k_inhabitants.
+# Let's pray for correlation...
+
+# Doctors data comes from:
+# http://datos.salud.gob.ar/dataset/profesionales-medicos-por-jurisdiccion/archivo/3ae764d8-e4f0-41bb-8648-20a526f0b927
+# 2016 baseline
+
+doctors <- read_csv("medicos-juridisccion-2016.csv")
+# Yeah, it's misspelled from the original source (emoji of face slap)
+
+
+# Joining:
+docs_1k <- doctors %>% 
+            left_join(pop_region, by = "provincia_id") %>% 
+            mutate(doctors_per_1k = medicos_cantidad_total / population_forecast_2016 * 1000) %>% 
+            select(provincia_id, provincia_desc.x, doctors_per_1k, population_forecast_2016)
+
+# Now we get the information from Confirmed cases by Region with respective avg.lag.diagnose
+# and join the docs_1k data.frame
+# With all that we make a plot between lag and doctors per 1k
+
+# Summary by Region
+arg.v2 %>%
+  filter(clasificacion_resumen == "Confirmado",
+         !is.na(fecha_inicio_sintomas), 
+         !is.na(fecha_diagnostico),
+         fecha_diagnostico > fecha_inicio_sintomas) %>%
+  rename(provincia_id = carga_provincia_id) %>% 
+  mutate(provincia_id = as.numeric(provincia_id)) %>% 
+  group_by(provincia_id) %>% 
+  summarise(avg_lag = mean(lag.diagnosis, na.rm = T),
+            med_lag = median(lag.diagnosis, na.rm = T),
+  ) %>% 
+  left_join(docs_1k, by = "provincia_id") %>%
+  ggplot(aes(x=avg_lag , y = doctors_per_1k, color = provincia_desc.x, label = provincia_desc.x)) + 
+  geom_point() +
+  xlab("Average Lag between Symptoms and Diagnose") + ylab("Doctors per 1k inhabitants") +
+  ggtitle("Figure 4. Relation between Average Lag and Doctors per 1k inhabitants") +
+  geom_text_repel(hjust = 0, nudge_x = 0.05) +
+  theme(legend.position = "none")
+
+```
+
+
+The scatterplot shows the average lag and number of doctors per 1000 for each provincia. It is clear from the graph that CABA is an extreme outlier, with the number of doctors far exceeding any other region. 
+
+In order to see the relationship between the average lag and the number of doctors for the other region more clearly, we removed CABA.
+
+
+
+```{r no_CABA, fig.cap= "Source: Ministry of Health & National Statistics Bureau - Argentina"}
+
+# The same without CABA's outlier (why do we need so many doctors???)
+arg.v2 %>%
+  filter(clasificacion_resumen == "Confirmado",
+         !is.na(fecha_inicio_sintomas), 
+         !is.na(fecha_diagnostico),
+         fecha_diagnostico > fecha_inicio_sintomas) %>%
+  rename(provincia_id = carga_provincia_id) %>% 
+  mutate(provincia_id = as.numeric(provincia_id)) %>% 
+  group_by(provincia_id) %>% 
+  summarise(avg_lag = mean(lag.diagnosis, na.rm = T),
+            med_lag = median(lag.diagnosis, na.rm = T),
+  ) %>% 
+  left_join(docs_1k, by = "provincia_id") %>%
+  filter(provincia_desc.x != c("CABA", "Formosa", "Misiones")) %>% 
+  ggplot(aes(x=avg_lag , y = doctors_per_1k, color = provincia_desc.x, label = provincia_desc.x)) +
+  geom_point() +
+  xlab("Average Lag between Symptoms and Diagnose") + ylab("Doctors per 1k inhabitants") +
+  ggtitle("Figure 5. Relation between Average Lag and Doctors per 1k inhabitants (excluding CABA)") +
+  geom_text_repel(hjust = 0, nudge_x = 0.05) +
+  theme(legend.position = "none", plot.title = element_text(size = 12))
+
+
+```
+
+Visual inspection of the scatterplot suggests there is little, if any, correlation between the average lag and the doctors per 1000 population. This may be explained by doctors per 1000k being a poor proxy for the regions’ testing capacity, for instance, if a region has plenty of doctors but is constrained by laboratory capacity or testing personnel numbers instead. 
+
+
+
+### Conclusion 
+
+We explored the overall progression of the pandemic in Argentina by looking at the daily number of cases and deaths over time. The decreasing slope of both case numbers and deaths suggests that the first wave of the outbreak is declining in Argentina. 
+
+Second, our analysis shows that there is considerable regional heterogeneity in the progression of the COVID-19 outbreak in Argentina. We can see from the timeseries of COVID-19 cases by region that there exhibits a significant lag between the start of the outbreak in the first regions (CABA and Buenos Aires) and elsewhere.
+
+Third, we also find regional heterogeneity in the average lag between the onset of COVID-19 symptoms and diagnosis. The faster the turnaround time between the onset of COVID-19 symptoms and diagnoses the greater the possibility of contact tracing, and the return to the workforce for self-isolating essential workers. The provinces of La Pampa and Santiago del Estero perform better, with their average lag roughly 2-3 days shorter than the national average. By contrast, La Rioja and San Luis perform significantly worse than the national average, with a lag between the onset of patients’ symptoms and their diagnosis up to 8 days longer. 
+
+Finally, we find that the number of doctors per 1000 population in Argentina does not explain these regional differences. While this may be better explained by regional differences in GDP, unfortunately, up to date data by province on GDP per capita was not available.
+
+
+
+\newpage
+
+
+### Appendix
+
+```{r neg_test_smells_fishy, fig.cap= "Source: Ministry of Health - Argentina"}
+###############################################
+# Sanity Check: Diff lag confirmed vs negative
+arg.v2 %>% 
+  filter(!is.na(fecha_inicio_sintomas), 
+         !is.na(fecha_diagnostico),
+         fecha_diagnostico > fecha_inicio_sintomas) %>%
+  filter(lag.diagnosis >= 0) %>% 
+  group_by(clasificacion_resumen, carga_provincia_nombre) %>% 
+  summarize(avg_lag = mean(lag.diagnosis, na.rm=T)) %>% 
+  pivot_wider(names_from = clasificacion_resumen, values_from = avg_lag) %>%
+  ggplot(aes(x=(Confirmado - Descartado))) + geom_histogram(fill = "pink", alpha = 0.75) +
+  xlab("") + ylab("n") + 
+  xlim(-25,25) +
+  ggtitle("Figure 6. Difference between positive and negative cases lags")
+```
+
+
+
+\newpage
+
+
+### Reproducibility
+
+All necessary code and data for reproducing this assignment can be found in the following link:
+
+<https://github.com/gonzalofichero/EDSD_102_Data_Wrangling>
+
+
+
+\newpage
+
+### References
+
+---
+nocite: '@*'
+---
